@@ -1,0 +1,124 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  extensions = [vector, prisma_postgres]
+}
+
+model User {
+  id           String          @id @default(uuid())
+  name         String
+  email        String          @unique
+  passwordHash String
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  documents    Document[]
+  subjects     Subject[]
+  progress     StudyProgress[]
+  quizzes      Quiz[]
+  attempts     QuizAttempt[]
+  tutorSessions TutorSession[]
+}
+
+model Document {
+  id               String          @id @default(uuid())
+  userId           String
+  user             User            @relation(fields: [userId], references: [id])
+  title            String
+  fileName         String
+  filePath         String
+  fileType         String
+  fileSize         Int
+  processingStatus String          @default("UPLOADED") // UPLOADED, PROCESSING, READY, FAILED
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  chunks           DocumentChunk[]
+}
+
+model DocumentChunk {
+  id         String                      @id @default(uuid())
+  documentId String
+  document   Document                    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  content    String
+  chunkIndex Int
+  embedding  Unsupported("vector(3072)")?
+  metadata   Json?
+  createdAt  DateTime                    @default(now())
+}
+
+model Subject {
+  id          String          @id @default(uuid())
+  userId      String
+  user        User            @relation(fields: [userId], references: [id])
+  name        String
+  description String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  progress    StudyProgress[]
+  quizzes     Quiz[]
+}
+
+model StudyProgress {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  subjectId     String
+  subject       Subject  @relation(fields: [subjectId], references: [id])
+  topic         String
+  score         Float    @default(0.0)
+  lastStudiedAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Quiz {
+  id        String         @id @default(uuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id])
+  subjectId String
+  subject   Subject        @relation(fields: [subjectId], references: [id])
+  title     String
+  createdAt DateTime       @default(now())
+  questions QuizQuestion[]
+  attempts  QuizAttempt[]
+}
+
+model QuizQuestion {
+  id            String  @id @default(uuid())
+  quizId        String
+  quiz          Quiz    @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  question      String
+  options       Json
+  correctAnswer String
+  explanation   String?
+  difficulty    String  @default("medium") // easy, medium, hard
+}
+
+model QuizAttempt {
+  id          String    @id @default(uuid())
+  quizId      String
+  quiz        Quiz      @relation(fields: [quizId], references: [id])
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  score       Float
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+}
+
+model TutorSession {
+  id                  String   @id @default(uuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id])
+  subject             String
+  topic               String
+  status              String   @default("ACTIVE") // ACTIVE, COMPLETED
+  conversationHistory Json     @default("[]")
+  currentConcept      String?
+  weakAreas           Json     @default("[]")
+  questionCount       Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
