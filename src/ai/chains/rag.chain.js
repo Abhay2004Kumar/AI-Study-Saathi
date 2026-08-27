@@ -1,51 +1,53 @@
-const { StringOutputParser } = require('@langchain/core/output_parsers');
-const { RunnableSequence, RunnablePassthrough } = require('@langchain/core/runnables');
-const { PGVectorRetriever } = require('../retrievers/pgvector.retriever');
+const { StructuredOutputParser } = require('@langchain/core/output_parsers');
+const { RunnableSequence } = require('@langchain/core/runnables');
+const { z } = require('zod');
 const { ragPromptTemplate } = require('../prompts/rag.prompt');
 
+// Structured output — not a bare string — is what lets the service layer
+// verify the model's claims instead of trusting them. `usedSourceIds` is
+// cross-checked against what was actually retrieved before anything is
+// reported to the user as a "source"; `foundInMaterials` is what forces the
+// service to blank out sources when the model answered from general
+// knowledge rather than the student's own resources.
+const ragAnswerSchema = z.object({
+  answer: z.string().describe("The answer to the student's question"),
+  foundInMaterials: z
+    .boolean()
+    .describe('True only if the numbered sources actually contained information that answers the question'),
+  usedSourceIds: z
+    .array(z.string())
+    .describe('The source labels (e.g. "S1", "S3") actually used to answer — empty if none were relevant or used'),
+});
+
 /**
- * Helper function to format an array of LangChain Document objects into a single string.
+ * Formats retrieved chunks into a numbered, labeled block the model can cite
+ * by label (S1, S2, ...) rather than by title, since multiple chunks can
+ * share the same document title.
  */
-const formatDocumentsAsString = (documents) => {
-  if (!documents || documents.length === 0) {
-    return "No relevant documents found.";
+function formatSourcesForPrompt(docs) {
+  if (!docs || docs.length === 0) {
+    return "No sources were found in the student's materials.";
   }
-  return documents.map(doc => `--- Document: ${doc.metadata.title} ---\n${doc.pageContent}\n`).join('\n');
-};
+  return docs
+    .map((doc, i) => {
+      const pageInfo = doc.metadata.page ? `, page ${doc.metadata.page}` : '';
+      return `[S${i + 1}] ${doc.metadata.title}${pageInfo}\n${doc.pageContent}`;
+    })
+    .join('\n\n');
+}
 
 /**
- * Constructs a LangChain Expression Language (LCEL) chain for RAG.
- * 
- * Flow:
- * 1. Takes { question }
- * 2. Assigns { context } by passing the question through the Retriever and formatting the docs.
- * 3. Passes { context, question } to the PromptTemplate.
- * 4. Passes formatted prompt to the LLM.
- * 5. Passes LLM response to StringOutputParser to extract the raw text.
- * 
- * @param {string} userId - The user ID to scope the retrieval to.
- * @param {object} llm - The instantiated language model (e.g., ChatGoogleGenerativeAI)
- * @returns {RunnableSequence} The executable LangChain pipeline.
+ * Builds the RAG answer-generation chain. Retrieval happens outside this
+ * chain (in the caller) so the same retrieved docs can be reused both to
+ * build the prompt context and to validate the model's source claims
+ * afterward, instead of retrieving twice.
+ *
+ * @param {object} llm - an instantiated chat model (e.g. ChatGoogleGenerativeAI)
  */
-const createRAGChain = (userId, llm) => {
-  const retriever = new PGVectorRetriever({ userId, topK: 3 });
-  
-  // Use LCEL to compose the chain
-  const chain = RunnableSequence.from([
-    {
-      context: async (input) => {
-        // Fetch docs and format them in one step
-        const docs = await retriever.invoke(input.question);
-        return formatDocumentsAsString(docs);
-      },
-      question: new RunnablePassthrough(), // Passes the question through unchanged
-    },
-    ragPromptTemplate,
-    llm,
-    new StringOutputParser(),
-  ]);
+async function buildRagChain(llm) {
+  const parser = StructuredOutputParser.fromZodSchema(ragAnswerSchema);
+  const prompt = await ragPromptTemplate.partial({ format_instructions: parser.getFormatInstructions() });
+  return RunnableSequence.from([prompt, llm, parser]);
+}
 
-  return { chain, retriever };
-};
-
-module.exports = { createRAGChain, formatDocumentsAsString };
+module.exports = { buildRagChain, formatSourcesForPrompt, ragAnswerSchema };

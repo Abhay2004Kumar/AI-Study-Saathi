@@ -9,56 +9,242 @@ datasource db {
 }
 
 model User {
-  id           String          @id @default(uuid())
-  name         String
-  email        String          @unique
-  passwordHash String
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
-  documents    Document[]
-  subjects     Subject[]
-  progress     StudyProgress[]
-  quizzes      Quiz[]
-  attempts     QuizAttempt[]
-  tutorSessions TutorSession[]
+  id                String             @id @default(uuid())
+  name              String
+  email             String             @unique
+  passwordHash      String
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  documents         Document[]
+  exams             Exam[]
+  subjects          Subject[]
+  progress          StudyProgress[]
+  quizzes           Quiz[]
+  attempts          QuizAttempt[]
+  tutorSessions     TutorSession[]
+  studyPlans        StudyPlan[]
+  flashcards        Flashcard[]
+  assistantSessions AssistantSession[]
+}
+
+// An exam a user is preparing for. The root of the syllabus tree
+// (Exam -> Subject -> Topic -> Subtopic) that later phases map
+// resources, PYQs, and study plans onto.
+model Exam {
+  id                   String             @id @default(uuid())
+  userId               String
+  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                 String
+  description          String?
+  examDate             DateTime?
+  // Hours/day the student can realistically study; feeds the Phase 9 planner.
+  availableHoursPerDay Float?
+  // Free-form extras (e.g. exam board, extraction source) that don't need their own column.
+  metadata             Json?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  subjects             Subject[]
+  documents            Document[]
+  studyPlans           StudyPlan[]
+  assistantSessions    AssistantSession[]
+
+  @@index([userId])
+}
+
+model Topic {
+  id                String                 @id @default(uuid())
+  subjectId         String
+  subject           Subject                @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  name              String
+  description       String?
+  orderIndex        Int                    @default(0)
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  subtopics         Subtopic[]
+  resourceMappings  ResourceTopicMapping[]
+  pyqQuestions      PyqQuestion[]
+  quizzes           Quiz[]
+  studyPlanSessions StudyPlanSession[]
+  flashcards        Flashcard[]
+
+  @@unique([subjectId, name])
+  @@index([subjectId])
+}
+
+model Subtopic {
+  id                String                 @id @default(uuid())
+  topicId           String
+  topic             Topic                  @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  name              String
+  description       String?
+  orderIndex        Int                    @default(0)
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  resourceMappings  ResourceTopicMapping[]
+  pyqQuestions      PyqQuestion[]
+  quizzes           Quiz[]
+  studyPlanSessions StudyPlanSession[]
+  flashcards        Flashcard[]
+
+  @@unique([topicId, name])
+  @@index([topicId])
+}
+
+// One extracted, individually topic-mapped question from a PYQ resource —
+// Phase 6's relational counterpart to the raw, unstructured
+// ResourceExtraction.questions blob from Phase 3. Reuses the same
+// never-trust-the-name-blindly validation and PENDING_REVIEW-below-threshold
+// pattern as ResourceTopicMapping (Phase 5), applied per-question instead of
+// per-resource so year-wise frequency can be computed per topic.
+model PyqQuestion {
+  id             String    @id @default(uuid())
+  documentId     String
+  document       Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  topicId        String?
+  topic          Topic?    @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  subtopicId     String?
+  subtopic       Subtopic? @relation(fields: [subtopicId], references: [id], onDelete: SetNull)
+  questionText   String
+  // Lowercased/whitespace-collapsed questionText, used to detect duplicate
+  // questions extracted from the same resource without discarding the
+  // original wording.
+  normalizedText String
+  options        Json?
+  correctAnswer  String?
+  // The exam year this question is from, only when the source text stated
+  // one explicitly — never guessed. Null years are excluded from year-wise
+  // frequency tracking but still count toward raw question volume.
+  year           Int?
+  confidence     Float?
+  status         String    @default("CONFIRMED") // CONFIRMED, PENDING_REVIEW, REJECTED
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([documentId])
+  @@index([topicId])
+}
+
+// Maps a resource (Document) onto a specific syllabus Topic/Subtopic, with
+// the page range where it's actually covered — the Phase 5 feature. AI
+// output is never trusted directly: mappings below CONFIDENCE_THRESHOLD land
+// as PENDING_REVIEW instead of CONFIRMED, so a low-confidence guess can't
+// silently misdirect a student's revision without a human (or a future
+// auto-approve rule) confirming it first.
+//
+// One (document, topic) pair can have several rows — the same resource often
+// covers a topic across more than one disjoint page range.
+model ResourceTopicMapping {
+  id         String    @id @default(uuid())
+  documentId String
+  document   Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  topicId    String
+  topic      Topic     @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  subtopicId String?
+  subtopic   Subtopic? @relation(fields: [subtopicId], references: [id], onDelete: SetNull)
+  startPage  Int?
+  endPage    Int?
+  confidence Float?
+  status     String    @default("CONFIRMED") // CONFIRMED, PENDING_REVIEW, REJECTED
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([documentId])
+  @@index([topicId])
+  @@index([subtopicId])
 }
 
 model Document {
-  id               String          @id @default(uuid())
-  userId           String
-  user             User            @relation(fields: [userId], references: [id])
-  title            String
-  fileName         String
-  filePath         String
-  fileType         String
-  fileSize         Int
-  processingStatus String          @default("UPLOADED") // UPLOADED, PROCESSING, READY, FAILED
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
-  chunks           DocumentChunk[]
+  id                       String                 @id @default(uuid())
+  userId                   String
+  user                     User                   @relation(fields: [userId], references: [id])
+  // Optional: a resource doesn't have to be tied to an exam (e.g. a quick
+  // upload before any exam exists), but when it is, this is how Phase 5+
+  // maps resources onto the syllabus tree.
+  examId                   String?
+  exam                     Exam?                  @relation(fields: [examId], references: [id], onDelete: SetNull)
+  title                    String
+  fileName                 String
+  filePath                 String
+  fileType                 String
+  fileSize                 Int
+  // User-selected at upload time. The Phase 3 classifier records its own
+  // opinion separately (aiCategory) rather than overwriting this — the
+  // user's choice is never silently changed out from under them.
+  category                 String                 @default("GENERAL") // SYLLABUS, NOTES, PYQ, GENERAL
+  // SHA-256 of the file content, used to catch re-uploading the same file.
+  fileHash                 String?
+  // Only meaningful for paginated formats (PDF); null otherwise.
+  pageCount                Int?
+  processingStatus         String                 @default("UPLOADED") // UPLOADED, PROCESSING, READY, FAILED
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  chunks                   DocumentChunk[]
+  // AI's own classification of the content, independent of the user's
+  // `category`. Null until ingestion runs (or if it fails — classification
+  // failure never blocks the document from being usable).
+  aiCategory               String?
+  classificationConfidence Float?
+  extraction               ResourceExtraction?
+  topicMappings            ResourceTopicMapping[]
+  pyqQuestions             PyqQuestion[]
+
+  @@index([userId, fileHash])
+  @@index([examId])
+}
+
+// The structured output of the Phase 3 ingestion pipeline for one document:
+// what the AI found, scoped by the resourceType it actually extracted for
+// (which may differ from the user's chosen category). Downstream phases
+// build on this rather than re-deriving it — Phase 5 turns `topics` into
+// validated syllabus mappings, Phase 6 turns `questions` into scored PYQ
+// records — so this table only holds the raw extraction, not their
+// validated/relational results.
+model ResourceExtraction {
+  id           String   @id @default(uuid())
+  documentId   String   @unique
+  document     Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  resourceType String // SYLLABUS, NOTES, PYQ, GENERAL — the type extraction actually branched on
+  summary      String?
+  // NOTES: array of { name, description? }. SYLLABUS: the same
+  // { subjects: [...] } tree shape produced by the Phase 1 syllabus
+  // extractor. Null for PYQ/GENERAL.
+  topics       Json?
+  // PYQ: array of { question, options?, correctAnswer?, year? }. Null otherwise.
+  questions    Json?
+  confidence   Float?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 model DocumentChunk {
-  id         String                      @id @default(uuid())
+  id         String                       @id @default(uuid())
   documentId String
-  document   Document                    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  document   Document                     @relation(fields: [documentId], references: [id], onDelete: Cascade)
   content    String
   chunkIndex Int
   embedding  Unsupported("vector(3072)")?
   metadata   Json?
-  createdAt  DateTime                    @default(now())
+  createdAt  DateTime                     @default(now())
 }
 
 model Subject {
   id          String          @id @default(uuid())
+  examId      String
+  exam        Exam            @relation(fields: [examId], references: [id], onDelete: Cascade)
   userId      String
   user        User            @relation(fields: [userId], references: [id])
   name        String
   description String?
+  orderIndex  Int             @default(0)
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
+  topics      Topic[]
   progress    StudyProgress[]
   quizzes     Quiz[]
+  flashcards  Flashcard[]
+
+  @@unique([examId, name])
+  @@index([examId])
 }
 
 model StudyProgress {
@@ -74,38 +260,84 @@ model StudyProgress {
   updatedAt     DateTime @updatedAt
 }
 
+// A generated-and-persisted quiz, scoped to one syllabus Topic (optionally a
+// Subtopic) rather than the free-text subject/topic strings the original
+// stub took — tying it into the same Exam -> Subject -> Topic tree Phases
+// 1-6 already built, so a topic's attempts can feed Phase 8's mastery engine
+// directly instead of needing a separate reconciliation step.
 model Quiz {
-  id        String         @id @default(uuid())
-  userId    String
-  user      User           @relation(fields: [userId], references: [id])
-  subjectId String
-  subject   Subject        @relation(fields: [subjectId], references: [id])
-  title     String
-  createdAt DateTime       @default(now())
-  questions QuizQuestion[]
-  attempts  QuizAttempt[]
+  id                String         @id @default(uuid())
+  userId            String
+  user              User           @relation(fields: [userId], references: [id])
+  subjectId         String
+  subject           Subject        @relation(fields: [subjectId], references: [id])
+  topicId           String?
+  topic             Topic?         @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  subtopicId        String?
+  subtopic          Subtopic?      @relation(fields: [subtopicId], references: [id], onDelete: SetNull)
+  title             String
+  difficulty        String         @default("medium") // easy, medium, hard
+  // Documents whose chunks were actually retrieved and fed to the LLM as
+  // context — surfaced to the user as "generated from these resources"
+  // rather than an unverifiable claim.
+  sourceDocumentIds Json?
+  createdAt         DateTime       @default(now())
+  questions         QuizQuestion[]
+  attempts          QuizAttempt[]
+
+  @@index([topicId])
+  @@index([subjectId])
 }
 
 model QuizQuestion {
-  id            String  @id @default(uuid())
-  quizId        String
-  quiz          Quiz    @relation(fields: [quizId], references: [id], onDelete: Cascade)
-  question      String
-  options       Json
-  correctAnswer String
-  explanation   String?
-  difficulty    String  @default("medium") // easy, medium, hard
+  id             String              @id @default(uuid())
+  quizId         String
+  quiz           Quiz                @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  question       String
+  options        Json
+  correctAnswer  String
+  explanation    String?
+  difficulty     String              @default("medium") // easy, medium, hard
+  attemptAnswers QuizAttemptAnswer[]
+
+  @@index([quizId])
 }
 
+// One completed pass at a Quiz. Score is always computed deterministically
+// server-side from QuizAttemptAnswer.isCorrect (exact-match against the
+// stored correctAnswer) — never taken on faith from the client.
 model QuizAttempt {
-  id          String    @id @default(uuid())
-  quizId      String
-  quiz        Quiz      @relation(fields: [quizId], references: [id])
-  userId      String
-  user        User      @relation(fields: [userId], references: [id])
-  score       Float
-  startedAt   DateTime  @default(now())
-  completedAt DateTime?
+  id             String              @id @default(uuid())
+  quizId         String
+  quiz           Quiz                @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User                @relation(fields: [userId], references: [id])
+  score          Float
+  totalQuestions Int
+  correctCount   Int
+  startedAt      DateTime            @default(now())
+  completedAt    DateTime?
+  answers        QuizAttemptAnswer[]
+
+  @@index([quizId])
+  @@index([userId])
+}
+
+// Per-question answer within one attempt — the granularity Phase 8's
+// mastery engine will need (correct/incorrect, per topic, over time), not
+// just an attempt-level aggregate score.
+model QuizAttemptAnswer {
+  id             String       @id @default(uuid())
+  attemptId      String
+  attempt        QuizAttempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  questionId     String
+  question       QuizQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  selectedAnswer String?
+  isCorrect      Boolean
+  createdAt      DateTime     @default(now())
+
+  @@index([attemptId])
+  @@index([questionId])
 }
 
 model TutorSession {
@@ -121,4 +353,109 @@ model TutorSession {
   questionCount       Int      @default(0)
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
+}
+
+// The Phase 9 output: a deterministic day-by-day schedule between now and
+// the exam date, built from Phase 6's importance scores and Phase 8's
+// mastery scores. Regenerating an exam's plan replaces it outright (same
+// "re-run fully replaces" convention as Phase 5's topic mapping) rather than
+// trying to merge — the whole point is that it reflects current mastery.
+model StudyPlan {
+  id          String             @id @default(uuid())
+  examId      String
+  exam        Exam               @relation(fields: [examId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User               @relation(fields: [userId], references: [id])
+  startDate   DateTime
+  endDate     DateTime
+  generatedAt DateTime           @default(now())
+  sessions    StudyPlanSession[]
+
+  @@unique([examId, userId])
+  @@index([userId])
+}
+
+model StudyPlanSession {
+  id              String    @id @default(uuid())
+  planId          String
+  plan            StudyPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  date            DateTime
+  topicId         String
+  topic           Topic     @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  subtopicId      String?
+  subtopic        Subtopic? @relation(fields: [subtopicId], references: [id], onDelete: SetNull)
+  durationMinutes Int
+  // The same priority score (weakness + importance) the session was
+  // allocated under — kept so the UI can explain "why today" without
+  // recomputing it.
+  priorityScore   Float
+  reason          String
+  completed       Boolean   @default(false)
+  completedAt     DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([planId])
+  @@index([topicId])
+  @@index([date])
+}
+
+// The Phase 10 output: a persisted, topic-scoped flashcard with its own
+// SM-2 spaced-repetition state, replacing the old ephemeral
+// generate-and-forget flashcard endpoint (same "found a dead stub, built it
+// properly" move as Phase 7 did for quizzes). Generating adds cards to the
+// topic's growing deck rather than replacing it — unlike a quiz or a study
+// plan, a card someone is already partway through a repetition schedule
+// shouldn't be discarded just because they generated a few more.
+model Flashcard {
+  id                String    @id @default(uuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id])
+  subjectId         String
+  subject           Subject   @relation(fields: [subjectId], references: [id])
+  topicId           String?
+  topic             Topic?    @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  subtopicId        String?
+  subtopic          Subtopic? @relation(fields: [subtopicId], references: [id], onDelete: SetNull)
+  front             String
+  back              String
+  hint              String?
+  // Lowercased/whitespace-collapsed `front`, used to skip creating a
+  // near-duplicate card when generating more for a topic that already has
+  // cards.
+  normalizedFront   String
+  sourceDocumentIds Json?
+  // SM-2 spaced-repetition state — deterministic, recomputed on every
+  // review from the previous state plus the grade given, never AI-judged.
+  easeFactor        Float     @default(2.5)
+  intervalDays      Int       @default(0)
+  repetitions       Int       @default(0)
+  dueAt             DateTime  @default(now())
+  lastReviewedAt    DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([userId, dueAt])
+  @@index([topicId])
+}
+
+// The Phase 11 output: one running conversation per (exam, user) with the
+// tool-calling AI Study Assistant. Distinct from TutorSession (a
+// document-scoped Socratic-teaching flow with its own concept/weak-area
+// tracking) — this is a general, exam-wide assistant that answers by
+// calling the same deterministic services every other phase already built
+// (mastery, study plan, PYQ importance) plus RAG over the student's own
+// materials, rather than free-associating.
+model AssistantSession {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  examId    String
+  exam      Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  // Array of { role: 'user'|'assistant', content, toolCalls?, createdAt }.
+  messages  Json     @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([examId, userId])
+  @@index([userId])
 }

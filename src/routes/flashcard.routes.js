@@ -1,9 +1,11 @@
 const express = require('express');
-const { generateFlashcards } = require('../controllers/flashcard.controller');
+const { reviewFlashcard } = require('../controllers/flashcard.controller');
 const { protect } = require('../middleware/auth.middleware');
 
 const router = express.Router();
 
-router.post('/generate', protect, generateFlashcards);
+router.use(protect);
+
+router.post('/:id/review', reviewFlashcard);
 
 module.exports = router;

@@ -20,14 +20,19 @@ const storage = multer.diskStorage({
   },
 });
 
+// Images are accepted so PYQ scans/photos have somewhere to live, but there
+// is no OCR pipeline yet (see Phase 0 decision to keep AI in Node and only
+// add a Python OCR service if it proves necessary) — documentProcessing.service
+// stores them as READY with no chunks until that exists.
+const allowedExtensions = ['.pdf', '.txt', '.md', '.jpg', '.jpeg', '.png'];
+
 const fileFilter = (req, file, cb) => {
-  const allowedExtensions = ['.pdf', '.txt', '.md'];
   const ext = path.extname(file.originalname).toLowerCase();
-  
+
   if (allowedExtensions.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Only PDF, TXT, and Markdown files are allowed.'), false);
+    cb(new Error('Invalid file type. Only PDF, TXT, Markdown, JPG, and PNG files are allowed.'), false);
   }
 };
 

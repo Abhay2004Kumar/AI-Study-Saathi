@@ -5,6 +5,12 @@ const config = require('../../config/env');
 
 const MAX_QUESTIONS = 6;
 
+// Every node's output here is rendered as plain text in the app (no math or
+// markdown rendering), so every free-text prompt needs this same guard —
+// otherwise a STEM topic prompts the model into LaTeX the UI can't render.
+const NO_LATEX_INSTRUCTION =
+  'Write in plain text only — no LaTeX (no $...$, \\(...\\), \\rightarrow, \\ge, etc.) and no markdown (no **bold**, no backticks). Use plain words or ordinary keyboard/unicode symbols for any formula or notation, e.g. "X -> A" or "X → A", ">=", "<=".';
+
 // -------------------------------------------------------------------
 // LLM Instances
 // -------------------------------------------------------------------
@@ -52,6 +58,8 @@ Your task:
 1. Explain the current concept clearly and concisely (2-3 sentences).
 2. Ask ONE specific, targeted question to check the student's understanding.
 
+${NO_LATEX_INSTRUCTION}
+
 Format your response as:
 EXPLANATION: <your explanation>
 QUESTION: <your question>`;
@@ -91,6 +99,8 @@ CONVERSATION HISTORY:
 ${formatHistory(state.conversationHistory)}
 
 STUDENT'S ANSWER: "${state.studentAnswer}"
+
+${NO_LATEX_INSTRUCTION}
 
 Evaluate the answer. Respond with ONLY a JSON object:
 {
@@ -147,6 +157,8 @@ ${state.studyContext}
 Re-explain this concept using a different, simpler approach or a real-world analogy.
 Then ask a simpler version of the question.
 
+${NO_LATEX_INSTRUCTION}
+
 Format:
 EXPLANATION: <simpler explanation>
 QUESTION: <simpler question>`;
@@ -178,6 +190,8 @@ ${formatHistory(state.conversationHistory)}
 
 Move to the NEXT concept in "${state.topic}". Explain it at a slightly harder level.
 Then ask a challenging question.
+
+${NO_LATEX_INSTRUCTION}
 
 Format:
 CONCEPT: <name of the new concept>

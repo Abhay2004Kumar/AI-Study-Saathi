@@ -1,104 +1,213 @@
 const request = require('supertest');
 const app = require('../src/app');
 const prisma = require('../src/config/db');
-const jwt = require('jsonwebtoken');
-const config = require('../src/config/env');
-const EmbeddingService = require('../src/ai/services/embedding.service');
+const fs = require('fs');
+const path = require('path');
 
-const generateToken = (id) => {
-  return jwt.sign({ id }, config.jwt.secret, {
-    expiresIn: config.jwt.expiresIn,
-  });
-};
+describe('Flashcard / Revision API (integration)', () => {
+  jest.setTimeout(60000);
 
-describe('Flashcard Generation API', () => {
-  let token;
-  let testUser;
-  let testDocument;
+  const owner = { name: 'Flash Owner', email: 'flashowner@test.com', password: 'password123' };
+  const intruder = { name: 'Flash Intruder', email: 'flashintruder@test.com', password: 'password123' };
+
+  let ownerToken, intruderToken, ownerUserId;
+  let examId, subjectId, weakTopicId;
+  let emptyExamId, emptyTopicId;
+  let dueCardId, futureCardId;
+
+  const notesFile = path.join(__dirname, 'flashcard-notes.txt');
+  const NOTES_CONTENT = `Process Scheduling Notes
+
+The CPU scheduler selects from among the processes in memory that are ready to execute and allocates the CPU to one of them.
+Short-term scheduling happens very frequently and must be fast.
+Round Robin scheduling assigns a fixed time slice, called a quantum, to each process in a cyclic order.
+First Come First Served (FCFS) is the simplest scheduling algorithm, running processes in arrival order.`;
 
   beforeAll(async () => {
-    testUser = await prisma.user.create({
+    fs.writeFileSync(notesFile, NOTES_CONTENT);
+    await prisma.user.deleteMany({ where: { email: { in: [owner.email, intruder.email] } } });
+
+    let res = await request(app).post('/api/auth/register').send(owner);
+    ownerToken = res.body.data.token;
+    ownerUserId = res.body.data.id;
+
+    res = await request(app).post('/api/auth/register').send(intruder);
+    intruderToken = res.body.data.token;
+
+    res = await request(app)
+      .post('/api/exams')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        name: 'Flashcard Test Exam',
+        subjects: [{ name: 'Operating Systems', topics: [{ name: 'Weak Topic' }] }],
+      });
+    examId = res.body.data.id;
+    subjectId = res.body.data.subjects[0].id;
+    weakTopicId = res.body.data.subjects[0].topics[0].id;
+
+    res = await request(app)
+      .post('/api/exams')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ name: 'Empty Flashcard Exam', subjects: [{ name: 'S', topics: [{ name: 'Untouched Topic' }] }] });
+    emptyExamId = res.body.data.id;
+    emptyTopicId = res.body.data.subjects[0].topics[0].id;
+
+    const dueCard = await prisma.flashcard.create({
       data: {
-        name: 'Flash User',
-        email: 'flash@example.com',
-        passwordHash: 'hashed_pass'
-      }
+        userId: ownerUserId,
+        subjectId,
+        topicId: weakTopicId,
+        front: 'What is FCFS?',
+        back: 'First Come First Served — simplest scheduling algorithm.',
+        normalizedFront: 'what is fcfs?',
+        dueAt: new Date(Date.now() - 24 * 60 * 60 * 1000), // due yesterday
+      },
     });
+    dueCardId = dueCard.id;
 
-    token = generateToken(testUser.id);
-
-    testDocument = await prisma.document.create({
+    const futureCard = await prisma.flashcard.create({
       data: {
-        userId: testUser.id,
-        title: 'Operating Systems Notes',
-        fileName: 'os.txt',
-        filePath: '/dummy/os.txt',
-        fileType: 'text/plain',
-        fileSize: 200,
-        processingStatus: 'READY'
-      }
+        userId: ownerUserId,
+        subjectId,
+        topicId: weakTopicId,
+        front: 'What is a quantum?',
+        back: 'The fixed time slice assigned to each process in Round Robin scheduling.',
+        normalizedFront: 'what is a quantum?',
+        dueAt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000), // due in 5 days
+      },
     });
-
-    const chunkText = `Process scheduling is a mechanism by which the operating system decides which process runs at what time.
-      The CPU scheduler selects from among the processes that are ready to execute and allocates the CPU to one of them.
-      Types of schedulers include: Short-term scheduler (CPU scheduler), Medium-term scheduler (swapper), and Long-term scheduler (job scheduler).
-      Scheduling criteria include: CPU utilization, throughput, turnaround time, waiting time, response time.
-      Common algorithms: First Come First Served (FCFS), Shortest Job First (SJF), Round Robin (RR), Priority Scheduling.`;
-
-    const queryEmbedding = await EmbeddingService.generateEmbedding(chunkText);
-    const vectorStr = `[${queryEmbedding.join(',')}]`;
-    const { randomUUID } = require('crypto');
-    const chunkId = randomUUID();
-
-    await prisma.$executeRaw`
-      INSERT INTO "DocumentChunk" ("id", "documentId", "content", "chunkIndex", "embedding")
-      VALUES (${chunkId}, ${testDocument.id}, ${chunkText}, 0, ${vectorStr}::vector)
-    `;
+    futureCardId = futureCard.id;
   });
 
   afterAll(async () => {
-    await prisma.documentChunk.deleteMany({});
-    await prisma.document.deleteMany({});
-    await prisma.user.deleteMany({});
+    if (fs.existsSync(notesFile)) fs.unlinkSync(notesFile);
+    await prisma.flashcard.deleteMany({ where: { userId: ownerUserId } });
+    await prisma.document.deleteMany({ where: { user: { email: { in: [owner.email, intruder.email] } } } });
+    await prisma.exam.deleteMany({ where: { user: { email: { in: [owner.email, intruder.email] } } } });
+    await prisma.user.deleteMany({ where: { email: { in: [owner.email, intruder.email] } } });
     await prisma.$disconnect();
   });
 
-  it('should return 400 if subject or topic is missing', async () => {
+  it('lists all flashcards for a topic regardless of due status', async () => {
     const res = await request(app)
-      .post('/api/flashcards/generate')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ subject: 'OS' }); // Missing topic
-
-    expect(res.statusCode).toEqual(400);
-    expect(res.body.success).toBe(false);
+      .get(`/api/exams/${examId}/topics/${weakTopicId}/flashcards`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.length).toBe(2);
   });
 
-  it('should generate a structured JSON flashcard deck successfully', async () => {
+  it('returns only cards due now across the exam, soonest first', async () => {
     const res = await request(app)
-      .post('/api/flashcards/generate')
-      .set('Authorization', `Bearer ${token}`)
-      .send({
-        subject: 'Operating Systems',
-        topic: 'Process Scheduling',
-        numberOfCards: 3
-      });
+      .get(`/api/exams/${examId}/flashcards/due`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.map((c) => c.id)).toEqual([dueCardId]);
+  });
 
-    expect(res.statusCode).toEqual(200);
-    expect(res.body.success).toBe(true);
+  it('grades a review with GOOD and reschedules the card into the future', async () => {
+    const res = await request(app)
+      .post(`/api/flashcards/${dueCardId}/review`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ grade: 'GOOD' });
 
-    const deck = res.body.data;
-    // Verify conformance to our Zod schema
-    expect(deck).toHaveProperty('subject');
-    expect(deck).toHaveProperty('topic');
-    expect(deck).toHaveProperty('flashcards');
-    expect(Array.isArray(deck.flashcards)).toBe(true);
-    expect(deck.flashcards.length).toBe(3);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.repetitions).toBe(1);
+    expect(res.body.data.intervalDays).toBe(1);
+    expect(new Date(res.body.data.dueAt).getTime()).toBeGreaterThan(Date.now());
+    expect(res.body.data.lastReviewedAt).not.toBeNull();
+  });
 
-    // Verify individual flashcard structure
-    const card = deck.flashcards[0];
-    expect(card).toHaveProperty('front');
-    expect(card).toHaveProperty('back');
-    expect(typeof card.front).toBe('string');
-    expect(typeof card.back).toBe('string');
-  }, 30000);
+  it('no longer shows the just-reviewed card in the due list', async () => {
+    const res = await request(app)
+      .get(`/api/exams/${examId}/flashcards/due`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+    expect(res.body.data.find((c) => c.id === dueCardId)).toBeUndefined();
+  });
+
+  it('resets progress on an AGAIN grade even after prior successful reviews', async () => {
+    // Fast-forward the card into the past again so it's reviewable, then grade AGAIN.
+    await prisma.flashcard.update({ where: { id: dueCardId }, data: { dueAt: new Date(Date.now() - 1000) } });
+    const res = await request(app)
+      .post(`/api/flashcards/${dueCardId}/review`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ grade: 'AGAIN' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.repetitions).toBe(0);
+    expect(res.body.data.intervalDays).toBe(1);
+  });
+
+  it('rejects an invalid grade', async () => {
+    const res = await request(app)
+      .post(`/api/flashcards/${dueCardId}/review`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ grade: 'KINDA' });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("does not let another user list, review, or see this owner's due cards", async () => {
+    let res = await request(app)
+      .get(`/api/exams/${examId}/topics/${weakTopicId}/flashcards`)
+      .set('Authorization', `Bearer ${intruderToken}`);
+    expect(res.statusCode).toBe(404);
+
+    res = await request(app).get(`/api/exams/${examId}/flashcards/due`).set('Authorization', `Bearer ${intruderToken}`);
+    expect(res.statusCode).toBe(404);
+
+    res = await request(app)
+      .post(`/api/flashcards/${futureCardId}/review`)
+      .set('Authorization', `Bearer ${intruderToken}`)
+      .send({ grade: 'GOOD' });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('refuses to generate flashcards for a topic with no material at all', async () => {
+    const res = await request(app)
+      .post(`/api/exams/${emptyExamId}/topics/${emptyTopicId}/flashcards`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ numberOfCards: 5 });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('generates new flashcards from uploaded notes, additively, without disturbing existing cards', async () => {
+    const uploadRes = await request(app)
+      .post('/api/documents')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .field('title', 'Scheduling Notes')
+      .field('examId', examId)
+      .field('category', 'NOTES')
+      .attach('file', notesFile);
+    const docId = uploadRes.body.data.id;
+
+    const waitForReady = async (documentId, timeoutMs = 45000) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const doc = await prisma.document.findUnique({ where: { id: documentId } });
+        if (doc.processingStatus === 'READY' || doc.processingStatus === 'FAILED') return doc;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      throw new Error(`Document ${documentId} did not finish processing in time`);
+    };
+    await waitForReady(docId);
+
+    const before = await prisma.flashcard.count({ where: { topicId: weakTopicId } });
+
+    const res = await request(app)
+      .post(`/api/exams/${examId}/topics/${weakTopicId}/flashcards`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ numberOfCards: 3 });
+
+    expect(res.statusCode).toBe(201);
+    res.body.data.forEach((c) => {
+      expect(c).toHaveProperty('front');
+      expect(c).toHaveProperty('back');
+      expect(c.repetitions).toBe(0);
+    });
+
+    const after = await prisma.flashcard.count({ where: { topicId: weakTopicId } });
+    expect(after).toBeGreaterThan(before); // additive, never replaced
+
+    // The two pre-seeded cards are still present, untouched.
+    const stillThere = await prisma.flashcard.findMany({ where: { id: { in: [dueCardId, futureCardId] } } });
+    expect(stillThere.length).toBe(2);
+  }, 60000); // full document pipeline (classify/extract/map/embed) + generation, not just one LLM call
 });
