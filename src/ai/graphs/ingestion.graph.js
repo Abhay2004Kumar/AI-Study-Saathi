@@ -15,7 +15,7 @@ const EXTRACT_INPUT_CHARS = 20000;
 
 const llm = new ChatGoogleGenerativeAI({
   apiKey: config.gemini.apiKey,
-  model: 'gemini-3.5-flash',
+  model: 'gemini-3.5-flash-lite',
   temperature: 0,
 });
 

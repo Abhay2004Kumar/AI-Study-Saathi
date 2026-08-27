@@ -7,8 +7,6 @@ const TopicMappingService = require('./topicMapping.service');
 const PyqIntelligenceService = require('./pyqIntelligence.service');
 const { isRecordGoneError } = require('../../utils/prismaErrors');
 
-const IMAGE_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png']);
-
 async function safeStatusUpdate(documentId, data) {
   try {
     await prisma.document.update({ where: { id: documentId }, data });
@@ -74,14 +72,10 @@ class DocumentProcessingService {
       // 2. Set status to PROCESSING
       await safeStatusUpdate(documentId, { processingStatus: 'PROCESSING' });
 
-      // No OCR pipeline yet — store images as-is so they're not stuck
-      // PROCESSING forever, but skip text extraction/embedding entirely.
-      if (IMAGE_TYPES.has(document.fileType)) {
-        await safeStatusUpdate(documentId, { processingStatus: 'READY' });
-        return true;
-      }
-
-      // 3. Load Document based on file type
+      // 3. Load Document based on file type — for an image this runs OCR
+      // (ai/services/ocr.service.js) and returns an empty array rather than
+      // throwing if nothing legible was found, so that case falls straight
+      // into the empty-content guard below instead of needing its own path.
       const docs = await loadDocumentAsLangchainDocs(document.filePath, document.fileType, document.fileName);
 
       // LangChain's PDFLoader returns one Document per page, so its length
@@ -98,6 +92,14 @@ class DocumentProcessingService {
       });
 
       const splitDocs = await textSplitter.splitDocuments(docs);
+
+      // Nothing extractable (an image with no legible text, or a blank
+      // file) — nothing to embed, map, or classify. Ready, with zero chunks,
+      // rather than forcing every downstream step to handle an empty input.
+      if (splitDocs.length === 0) {
+        await safeStatusUpdate(documentId, { processingStatus: 'READY' });
+        return true;
+      }
 
       // 5. Generate embeddings and store chunks
       const textsToEmbed = splitDocs.map(doc => doc.pageContent);
